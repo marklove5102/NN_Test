@@ -14,6 +14,7 @@
 #include <memory>
 #include <chrono>
 #include <format>
+#include <cmath>
 
 #include <opencv2/opencv.hpp>
 
@@ -30,19 +31,16 @@ constexpr float confidence_threshold{ 0.45 }; // confidence threshold
 constexpr float iou_threshold{ 0.50 }; // iou threshold
 constexpr float mask_threshold{ 0.50 }; // segment mask threshold
 
-#ifdef _MSC_VER
 constexpr char onnx_file[]{ "../../../data/best.onnx" };
 constexpr char torchscript_file[]{ "../../../data/best.torchscript" };
 constexpr char images_dir[]{ "../../../data/images/predict" };
 constexpr char result_dir[]{ "../../../data/result" };
 constexpr char classes_file[]{ "../../../data/images/labels.txt" };
-#else
-constexpr char onnx_file[]{ "data/best.onnx" };
-constexpr char torchscript_file[]{ "data/best.torchscript" };
-constexpr char images_dir[]{ "data/images/predict" };
-constexpr char result_dir[]{ "data/result" };
-constexpr char classes_file[]{ "data/images/labels.txt" };
-#endif
+
+const std::vector<std::string> obb_class_names{
+	"plane", "ship", "storage tank", "baseball diamond", "tennis court", "basketball court", "ground track field", "harbor",
+	"bridge", "large vehicle", "small vehicle", "helicopter", "roundabout", "soccer ball field", "swimming pool"
+};
 
 cv::Mat modify_image_size(const cv::Mat& img)
 {
@@ -473,6 +471,87 @@ void post_process_mask(const cv::Mat& output0, const cv::Mat& output1, const std
 	}
 
 	draw_boxes_mask(classes, ids, confs, rects, mks, name, frame);
+}
+
+void draw_rotated_rect(const std::vector<std::string>classes, const std::vector<int>& ids, const std::vector<float>& confs, const std::vector<cv::RotatedRect>& boxes, const std::string& name, cv::Mat& frame)
+{
+	std::cout << "image name: " << name << ", number of detections: " << ids.size() << std::endl;
+
+	//std::random_device rd;
+	std::mt19937 gen(66); // gen(rd())
+	std::uniform_int_distribution<int> dis(100, 255);
+
+	std::vector<cv::Scalar> colors;
+	for (auto i = 0; i < classes.size(); ++i)
+		colors.emplace_back(cv::Scalar(dis(gen), dis(gen), dis(gen)));
+
+	for (auto i = 0; i < ids.size(); ++i) {
+		auto rotated_rect = boxes[i];
+		cv::Point2f pts[4];
+		rotated_rect.points(pts);
+
+		for (auto j = 0; j < 4; ++j)
+			cv::line(frame, pts[j], pts[(j + 1) % 4], colors[ids[i]], 2);
+
+		auto center = boxes[i].center;
+		std::string text = classes[ids[i]] + "," + std::to_string(confs[i]).substr(0, 4);
+		cv::Size text_size = cv::getTextSize(text, cv::FONT_HERSHEY_DUPLEX, 1, 2, 0);
+		cv::Point text_org(static_cast<int>(center.x - text_size.width / 2), static_cast<int>(center.y + text_size.height / 2));
+		cv::putText(frame, text, text_org, cv::FONT_HERSHEY_DUPLEX, 1, colors[ids[i]], 2);
+	}
+
+	std::string path(result_dir);
+	cv::imwrite(path + "/" + name, frame);
+}
+
+void post_process2(const float* data, int rows, int stride, float xfactor, float yfactor, const std::vector<std::string>classes, const std::string& image_name, cv::Mat& frame)
+{
+	const double PI{ std::acos(-1) }; // 3.1415926...
+
+	std::vector<int> class_ids{};
+	std::vector<float> confidences{};
+	std::vector<cv::RotatedRect> boxes{};
+
+	for (auto i = 0; i < rows; ++i) {
+		const float* classes_scores = data + 4;
+		cv::Mat scores(1, classes.size(), CV_32FC1, (float*)classes_scores);
+		cv::Point class_id{};
+		double max_class_score{};
+		cv::minMaxLoc(scores, 0, &max_class_score, 0, &class_id);
+
+		if (max_class_score > confidence_threshold) {
+			confidences.push_back(max_class_score);
+			class_ids.push_back(class_id.x);
+
+			float x = data[0] * xfactor;
+			float y = data[1] * yfactor;
+			float w = data[2] * xfactor;
+			float h = data[3] * yfactor;
+
+			float angle = data[stride - 1];
+			if (angle >= 0.5 * PI && angle <= 0.75 * PI)
+				angle = angle - PI;
+
+			cv::RotatedRect box = cv::RotatedRect(cv::Point2f(x, y), cv::Size2f(w, h), angle * 180 / PI);
+			boxes.push_back(box);
+		}
+
+		data += stride;
+	}
+
+	std::vector<int> nms_result{};
+	cv::dnn::NMSBoxes(boxes, confidences, confidence_threshold, iou_threshold, nms_result);
+
+	std::vector<int> ids;
+	std::vector<float> confs;
+	std::vector<cv::RotatedRect> result{};
+	for (size_t i = 0; i < nms_result.size(); ++i) {
+		ids.emplace_back(class_ids[nms_result[i]]);
+		confs.emplace_back(confidences[nms_result[i]]);
+		result.emplace_back(boxes[nms_result[i]]);
+	}
+
+	draw_rotated_rect(classes, ids, confs, result, image_name, frame);
 }
 
 } // namespace
@@ -1179,6 +1258,141 @@ int test_yolov8_segment_libtorch()
 	}
 	catch (const c10::Error& e) {
 		std::cerr << "Error: " << e.msg() << std::endl;
+		return -1;
+	}
+
+	return 0;
+}
+
+/////////////////////////////////////////////////////////////////
+// Blog: https://blog.csdn.net/fengbingchun/article/details/157615429
+int test_yolo11_obb_opencv()
+{
+	namespace fs = std::filesystem;
+
+	auto net = cv::dnn::readNetFromONNX(onnx_file);
+	if (net.empty()) {
+		std::cerr << "Error: there are no layers in the network: " << onnx_file << std::endl;
+		return -1;
+	}
+
+	if (cuda_enabled) {
+		net.setPreferableBackend(cv::dnn::DNN_BACKEND_CUDA);
+		net.setPreferableTarget(cv::dnn::DNN_TARGET_CUDA);
+	}
+	else {
+		net.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
+		net.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
+	}
+
+	if (!fs::exists(result_dir)) {
+		fs::create_directories(result_dir);
+	}
+
+	for (const auto& [key, val] : get_dir_images(images_dir)) {
+		cv::Mat frame = cv::imread(val, cv::IMREAD_COLOR);
+		if (frame.empty()) {
+			std::cerr << "Warning: unable to load image: " << val << std::endl;
+			continue;
+		}
+
+		cv::Mat bgr = modify_image_size(frame);
+
+		cv::Mat blob;
+		cv::dnn::blobFromImage(bgr, blob, 1.0 / 255.0, cv::Size(input_size[1], input_size[0]), cv::Scalar(), true, false);
+		net.setInput(blob);
+
+		std::vector<cv::Mat> outputs;
+		net.forward(outputs, net.getUnconnectedOutLayersNames());
+		if (outputs.empty()) {
+			std::cerr << "Error: no output from model" << std::endl;
+			continue;
+		}
+
+		auto rows = outputs[0].size[2];
+		auto dimensions = outputs[0].size[1];
+		outputs[0] = outputs[0].reshape(1, dimensions);
+		cv::transpose(outputs[0], outputs[0]);
+		float* data = (float*)outputs[0].data;
+
+		float x_factor = bgr.cols * 1.f / input_size[1];
+		float y_factor = bgr.rows * 1.f / input_size[0];
+
+		post_process2(data, rows, dimensions, x_factor, y_factor, obb_class_names, key, frame);
+	}
+
+	return 0;
+}
+
+int test_yolo11_obb_onnxruntime()
+{
+	try {
+		Ort::Env env = Ort::Env(ORT_LOGGING_LEVEL_WARNING, "YOLO11");
+		Ort::SessionOptions session_option;
+
+		if (cuda_enabled) {
+			OrtCUDAProviderOptions cuda_option;
+			cuda_option.device_id = 0;
+			session_option.AppendExecutionProvider_CUDA(cuda_option);
+		}
+
+		session_option.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+		session_option.SetIntraOpNumThreads(1);
+		session_option.SetLogSeverityLevel(3);
+
+		Ort::Session session(env, ctow(onnx_file).c_str(), session_option);
+		Ort::AllocatorWithDefaultOptions allocator;
+		std::vector<const char*> input_node_names, output_node_names;
+		std::vector<std::string> input_node_names_, output_node_names_;
+
+		for (auto i = 0; i < session.GetInputCount(); ++i) {
+			Ort::AllocatedStringPtr input_node_name = session.GetInputNameAllocated(i, allocator);
+			input_node_names_.emplace_back(input_node_name.get());
+		}
+
+		for (auto i = 0; i < session.GetOutputCount(); ++i) {
+			Ort::AllocatedStringPtr output_node_name = session.GetOutputNameAllocated(i, allocator);
+			output_node_names_.emplace_back(output_node_name.get());
+		}
+
+		for (auto i = 0; i < input_node_names_.size(); ++i)
+			input_node_names.emplace_back(input_node_names_[i].c_str());
+		for (auto i = 0; i < output_node_names_.size(); ++i)
+			output_node_names.emplace_back(output_node_names_[i].c_str());
+
+		Ort::RunOptions options(nullptr);
+		std::unique_ptr<float[]> blob(new float[input_size[0] * input_size[1] * 3]);
+		std::vector<int64_t> input_node_dims{ 1, 3, input_size[1], input_size[0] };
+
+		for (const auto& [key, val] : get_dir_images(images_dir)) {
+			cv::Mat frame = cv::imread(val, cv::IMREAD_COLOR);
+			if (frame.empty()) {
+				std::cerr << "Warning: unable to load image: " << val << std::endl;
+				continue;
+			}
+
+			cv::Mat rgb;
+			auto resize_scales = image_preprocess(frame, rgb);
+			image_to_blob(rgb, blob.get());
+			Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+				Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU), blob.get(), 3 * input_size[1] * input_size[0], input_node_dims.data(), input_node_dims.size());
+			auto output_tensors = session.Run(options, input_node_names.data(), &input_tensor, input_node_names.size(), output_node_names.data(), output_node_names.size());
+
+			Ort::TypeInfo type_info = output_tensors.front().GetTypeInfo();
+			auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+			std::vector<int64_t> output_node_dims = tensor_info.GetShape();
+			auto output = output_tensors.front().GetTensorMutableData<float>();
+			int stride_num = output_node_dims[1];
+			int signal_result_num = output_node_dims[2];
+			cv::Mat raw_data = cv::Mat(stride_num, signal_result_num, CV_32F, output);
+			raw_data = raw_data.t();
+			const float* data = (float*)raw_data.data;
+
+			post_process2(data, signal_result_num, stride_num, resize_scales, resize_scales, obb_class_names, key, frame);
+		}
+	}
+	catch (const std::exception& e) {
+		std::cerr << "Error: " << e.what() << std::endl;
 		return -1;
 	}
 

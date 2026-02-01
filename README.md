@@ -16,6 +16,7 @@
 		- Object Detection
 		- Instance Segmentation
 		- Classify
+		- OBB
 - mathematical formula's implement with C++
 	- Linear Algebra
 		- transpose
