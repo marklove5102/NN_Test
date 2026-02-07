@@ -97,6 +97,7 @@
 				- [k-menas opencv](demo/Python/test_k-means_opencv.py)
 			- [txt to csv](demo/Python/test_txt_to_csv_convert.py)
 			- [XGBoost Regress](demo/Python/test_xgboost.py)
+			- [K-Fold Cross-Validation](demo/Python/test_k-fold.py)
 	- MediaPipe
 		- Installation(Anaconda)
 			```
