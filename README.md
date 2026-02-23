@@ -99,6 +99,7 @@
 			- [XGBoost Regress](demo/Python/test_xgboost.py)
 			- [K-Fold Cross-Validation](demo/Python/test_k-fold.py)
 			- [McNemar's Test](demo/Python/test_mcnemar_test.py)
+			- [Ensemble Learning](demo/Python/test_ensemble_learning.py)
 	- MediaPipe
 		- Installation(Anaconda)
 			```
