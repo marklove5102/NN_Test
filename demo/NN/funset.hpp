@@ -1,6 +1,7 @@
 #ifndef FBC_TEST_NN_FUNSET_HPP_
 #define FBC_TEST_NN_FUNSET_HPP_
 
+int test_openvino_classify();
 int test_ollama_model_list();
 int test_ollama_chat();
 int test_ollama_chat_stream();
